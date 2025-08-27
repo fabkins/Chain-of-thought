@@ -1,6 +1,7 @@
 import ollama
 import chromadb
 import uuid, datetime
+import os
 
 # --- Config ---
 MODEL = "llama3.2"   # use same model for chat + embeddings
@@ -10,7 +11,6 @@ chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
 def get_bot_collection(bot_id):
     """Return (or create) a ChromaDB collection for this bot."""
-    # Do NOT use DefaultEmbeddingFunction here, we supply embeddings ourselves
     return chroma_client.get_or_create_collection(
         name=f"chat_{bot_id}"
     )
@@ -57,12 +57,43 @@ def retrieve_memories(bot_id, query, n_results=5):
     )
     return results.get("documents", [[]])[0]
 
+# --- Classification Helper ---
+def classify_fact(user_input):
+    """
+    Ask the model if this user statement should be stored as a core memory (fact) 
+    or just an event. Returns 'core' or 'event'.
+    """
+    system_prompt = """You are a memory classifier.
+Decide if a user statement should be stored as:
+- CORE FACT: enduring, important, personal detail (e.g. name, birthday, favorite things, relationships, jobs, places lived).
+- EVENT: temporary or casual statements, greetings, chit-chat.
+
+Answer with only 'core' or 'event'."""
+
+    response = ollama.chat(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_input},
+        ],
+    )
+    return response["message"]["content"].strip().lower()
+
 # --- Chat Function ---
 def chat_with_bot(bot_id, user_input, recent_history):
+    # 1. Classify and store user input
+    classification = classify_fact(user_input)
+    if classification == "core":
+        store_core_fact(bot_id, f"User fact: {user_input}")
+    else:
+        store_event(bot_id, f"Conversation: {user_input}", importance=0.5)
+
+    # 2. Retrieve relevant memories
     memories = retrieve_memories(bot_id, user_input)
     history = "\n".join([f"{role}: {msg}" for role, msg in recent_history])
     context = "\n".join(memories)
 
+    # 3. Build prompt
     prompt = f"""
 You are a unique character with personality and evolving history.
 
@@ -75,11 +106,13 @@ Recent conversation:
 User: {user_input}
 Assistant (in character):"""
 
+    # 4. Generate bot reply
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     reply = response["message"]["content"]
 
-    # Save conversation as an event
-    store_event(bot_id, f"Conversation with user: '{user_input}' → '{reply}'", importance=0.5)
+    # 5. Store assistant reply as an event
+    store_event(bot_id, f"Bot reply: {reply}", importance=0.4)
+
     return reply
 
 # --- Seed Bots ---
@@ -108,8 +141,6 @@ def database_is_empty():
     return len(chroma_client.list_collections()) == 0
 
 # --- Interactive Chat Loop ---
-import os
-
 if __name__ == "__main__":
     print("Multi-Bot Chatbot ready! Type 'quit' to exit.\n")
 
@@ -123,11 +154,9 @@ if __name__ == "__main__":
 
     bot_id = input("\nTalk to which bot? (e.g. isabella/kai): ").strip()
     if bot_id.lower() in ["quit", "exit"]:
-        # Exit if user wants to quit here
         exit(0)
 
     while True:
-
         if bot_id not in recent_histories:
             recent_histories[bot_id] = []
 
