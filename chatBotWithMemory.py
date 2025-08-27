@@ -2,12 +2,22 @@ import ollama
 import chromadb
 import uuid, datetime
 import os
+from colorama import Fore, Style, init
 
 # --- Config ---
 MODEL = "llama3.2"   # use same model for chat + embeddings
+DEBUG = True         # set to False to hide memory/classifier logs
+
+# --- Setup Colorama ---
+init(autoreset=True)
 
 # --- Setup ChromaDB ---
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
+
+def debug_log(msg):
+    """Print debug messages only if DEBUG is enabled."""
+    if DEBUG:
+        print(Fore.CYAN + msg + Style.RESET_ALL)
 
 def get_bot_collection(bot_id):
     """Return (or create) a ChromaDB collection for this bot."""
@@ -33,6 +43,7 @@ def store_core_fact(bot_id, content):
             "importance": 1.0
         }]
     )
+    debug_log(f"[MEMORY] Stored CORE fact for {bot_id}: {content}")
 
 def store_event(bot_id, content, importance=0.5):
     collection = get_bot_collection(bot_id)
@@ -47,6 +58,7 @@ def store_event(bot_id, content, importance=0.5):
             "importance": importance
         }]
     )
+    debug_log(f"[MEMORY] Stored EVENT for {bot_id}: {content}")
 
 def retrieve_memories(bot_id, query, n_results=5):
     """Retrieve relevant memories for this bot (core + events)."""
@@ -77,7 +89,9 @@ Answer with only 'core' or 'event'."""
             {"role": "user", "content": user_input},
         ],
     )
-    return response["message"]["content"].strip().lower()
+    classification = response["message"]["content"].strip().lower()
+    debug_log(f"[CLASSIFIER] Input classified as: {classification.upper()}")
+    return classification
 
 # --- Chat Function ---
 def chat_with_bot(bot_id, user_input, recent_history):
@@ -160,14 +174,12 @@ if __name__ == "__main__":
         if bot_id not in recent_histories:
             recent_histories[bot_id] = []
 
-        user_input = input(f"\n\nYou to {bot_id}: ")
+        user_input = input(Fore.YELLOW + f"\n\nYou to {bot_id}: " + Style.RESET_ALL)
         if user_input.lower() in ["quit", "exit"]:
             break
 
-        print(f"\n")
-
         reply = chat_with_bot(bot_id, user_input, recent_histories[bot_id])
-        print(f"{bot_id}: {reply}")
+        print(Fore.GREEN + f"\n{bot_id}: {reply}" + Style.RESET_ALL)
 
         # Update short-term memory (last 10 turns)
         recent_histories[bot_id].append(("user", user_input))
