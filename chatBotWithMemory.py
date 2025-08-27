@@ -1,23 +1,16 @@
 import ollama
 import chromadb
-import uuid, datetime
-import os
+import uuid, datetime, os
 from colorama import Fore, Style, init
 
 # --- Config ---
 MODEL = "llama3.2"   # use same model for chat + embeddings
-DEBUG = True         # set to False to hide memory/classifier logs
 
-# --- Setup Colorama ---
+# Initialize colorama
 init(autoreset=True)
 
 # --- Setup ChromaDB ---
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
-
-def debug_log(msg):
-    """Print debug messages only if DEBUG is enabled."""
-    if DEBUG:
-        print(Fore.CYAN + msg + Style.RESET_ALL)
 
 def get_bot_collection(bot_id):
     """Return (or create) a ChromaDB collection for this bot."""
@@ -30,7 +23,8 @@ def embed_text(text: str):
     """Get an embedding using Ollama."""
     return ollama.embeddings(model=MODEL, prompt=text)["embedding"]
 
-def store_core_fact(bot_id, content):
+def store_memory(bot_id, content, memory_type="event", importance=0.5):
+    """Store a memory (core fact or event) into Chroma."""
     collection = get_bot_collection(bot_id)
     doc_id = str(uuid.uuid4())
     collection.add(
@@ -38,27 +32,13 @@ def store_core_fact(bot_id, content):
         embeddings=[embed_text(content)],
         documents=[content],
         metadatas=[{
-            "type": "core",
-            "timestamp": str(datetime.datetime.now()),
-            "importance": 1.0
-        }]
-    )
-    debug_log(f"[MEMORY] Stored CORE fact for {bot_id}: {content}")
-
-def store_event(bot_id, content, importance=0.5):
-    collection = get_bot_collection(bot_id)
-    doc_id = str(uuid.uuid4())
-    collection.add(
-        ids=[doc_id],
-        embeddings=[embed_text(content)],
-        documents=[content],
-        metadatas=[{
-            "type": "event",
+            "type": memory_type,
             "timestamp": str(datetime.datetime.now()),
             "importance": importance
         }]
     )
-    debug_log(f"[MEMORY] Stored EVENT for {bot_id}: {content}")
+    color = Fore.CYAN
+    print(color + f"[Memory Stored] ({memory_type.upper()}) {content}")
 
 def retrieve_memories(bot_id, query, n_results=5):
     """Retrieve relevant memories for this bot (core + events)."""
@@ -69,45 +49,39 @@ def retrieve_memories(bot_id, query, n_results=5):
     )
     return results.get("documents", [[]])[0]
 
-# --- Classification Helper ---
-def classify_fact(user_input):
-    """
-    Ask the model if this user statement should be stored as a core memory (fact) 
-    or just an event. Returns 'core' or 'event'.
-    """
-    system_prompt = """You are a memory classifier.
-Decide if a user statement should be stored as:
-- CORE FACT: enduring, important, personal detail (e.g. name, birthday, favorite things, relationships, jobs, places lived).
-- EVENT: temporary or casual statements, greetings, chit-chat.
+def classify_memory(user_input, ai_reply):
+    """Classify whether interaction should be core memory or event."""
+    classification_prompt = f"""
+Decide if this interaction is a CORE FACT (long-term important info about identity, relationships, life events, or consistent traits) 
+or a TEMPORARY EVENT (situational, casual, or transient detail).
 
-Answer with only 'core' or 'event'."""
+User: {user_input}
+AI: {ai_reply}
 
-    response = ollama.chat(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input},
-        ],
-    )
-    classification = response["message"]["content"].strip().lower()
-    debug_log(f"[CLASSIFIER] Input classified as: {classification.upper()}")
-    return classification
+Answer only 'core' or 'event'.
+"""
+    response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": classification_prompt}])
+    result = response["message"]["content"].strip().lower()
+    return "core" if "core" in result else "event"
+
+def summarize_interaction(user_input, ai_reply):
+    """Summarize the exchange into a factual sentence."""
+    prompt = f"""
+Summarize the following interaction into ONE concise factual sentence that captures what was learned.
+
+User: {user_input}
+AI: {ai_reply}
+
+Summary:"""
+    response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
+    return response["message"]["content"].strip()
 
 # --- Chat Function ---
 def chat_with_bot(bot_id, user_input, recent_history):
-    # 1. Classify and store user input
-    classification = classify_fact(user_input)
-    if classification == "core":
-        store_core_fact(bot_id, f"User fact: {user_input}")
-    else:
-        store_event(bot_id, f"Conversation: {user_input}", importance=0.5)
-
-    # 2. Retrieve relevant memories
     memories = retrieve_memories(bot_id, user_input)
     history = "\n".join([f"{role}: {msg}" for role, msg in recent_history])
     context = "\n".join(memories)
 
-    # 3. Build prompt
     prompt = f"""
 You are a unique character with personality and evolving history.
 
@@ -120,19 +94,20 @@ Recent conversation:
 User: {user_input}
 Assistant (in character):"""
 
-    # 4. Generate bot reply
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     reply = response["message"]["content"]
 
-    # 5. Store assistant reply as an event
-    store_event(bot_id, f"Bot reply: {reply}", importance=0.4)
+    # Summarize & classify this turn
+    summary = summarize_interaction(user_input, reply)
+    memory_type = classify_memory(user_input, reply)
+    store_memory(bot_id, summary, memory_type)
 
     return reply
 
 # --- Seed Bots ---
 def seed_bot(bot_id, backstory_facts):
     for fact in backstory_facts:
-        store_core_fact(bot_id, fact)
+        store_memory(bot_id, fact, memory_type="core", importance=1.0)
 
 # Example backstories (run once)
 def seed_example_bots():
@@ -156,17 +131,17 @@ def database_is_empty():
 
 # --- Interactive Chat Loop ---
 if __name__ == "__main__":
-    print("Multi-Bot Chatbot ready! Type 'quit' to exit.\n")
+    print(Fore.CYAN + "Multi-Bot Chatbot ready! Type 'quit' to exit.\n")
 
     # Auto-seed if database doesn't exist
     if database_is_empty():
-        print("No database found, seeding example bots...")
+        print(Fore.CYAN + "No database found, seeding example bots...")
         os.makedirs("./chroma_db", exist_ok=True)
         seed_example_bots()
 
     recent_histories = {}
 
-    bot_id = input("\nTalk to which bot? (e.g. isabella/kai): ").strip()
+    bot_id = input(Fore.YELLOW + "\nTalk to which bot? (e.g. isabella/kai): ").strip()
     if bot_id.lower() in ["quit", "exit"]:
         exit(0)
 
@@ -174,12 +149,15 @@ if __name__ == "__main__":
         if bot_id not in recent_histories:
             recent_histories[bot_id] = []
 
-        user_input = input(Fore.YELLOW + f"\n\nYou to {bot_id}: " + Style.RESET_ALL)
+        user_input = input(Fore.YELLOW + f"\nYou to {bot_id}: ")
         if user_input.lower() in ["quit", "exit"]:
             break
 
+        print("\n")
         reply = chat_with_bot(bot_id, user_input, recent_histories[bot_id])
-        print(Fore.GREEN + f"\n{bot_id}: {reply}" + Style.RESET_ALL)
+        print("\n")
+
+        print(Fore.GREEN + f"{bot_id}: {reply}")
 
         # Update short-term memory (last 10 turns)
         recent_histories[bot_id].append(("user", user_input))
