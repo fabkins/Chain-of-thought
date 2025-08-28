@@ -64,25 +64,52 @@ def retrieve_memories(bot_id, query, n_results=5):
 def summarize_interaction(user_input, ai_reply):
     """Extract only explicit factual info from the exchange."""
     prompt = f"""
-Extract ONLY clear factual statements from this interaction. Be very explicit and ALWAYS extract:
+Extract ALL clear factual statements from this interaction. For each statement:
+1. Start with WHO the fact is about ("The user" or "The AI")
+2. State the fact clearly and completely
+3. Include context if directly stated
 
-1. NAMES:
-   - If someone says "my name is X" -> "The user's name is X" or "The AI's name is X"
-   - If someone introduces themselves as X -> "The user's name is X" or "The AI's name is X"
+CAREFULLY CHECK FOR:
 
-2. HISTORY:
-   - If someone mentions past jobs/experiences -> "The user used to be/have X"
-   - If someone mentions previous ownership -> "The user used to own X"
+1. NAMES & IDENTITY:
+   - Names and titles ("My name is X", "I am X", "I'm X")
+   - Roles and professions ("I am a X", "I work as X")
+   - Family relationships ("X is my Y")
 
-3. CURRENT:
-   - Current jobs/roles
-   - Current ownership
+2. OWNERSHIP & POSSESSION:
+   - Current ownership ("I have X", "I own X")
+   - Business ownership ("My shop", "My store", "My company")
+   - Property ("My house", "My car")
+
+3. HISTORY & PAST:
+   - Past experiences ("I used to X")
+   - Previous ownership ("I had X")
+   - Past events ("When I was X")
+   - Previous jobs ("I worked as X")
+   - Memories ("reminds me of when")
+
+4. CURRENT STATUS:
+   - Present occupation
    - Current location
+   - Current activities
+   - Business details
+   - Living situation
 
-4. PREFERENCES:
-   - Likes/dislikes
-   - Hobbies
-   - Interests
+5. PERSONAL TRAITS:
+   - Preferences ("I like X", "I love X")
+   - Skills ("I can X", "I know how to X")
+   - Habits ("I always X", "I never X")
+   - Beliefs ("I believe X", "I think X")
+   - Feelings ("I feel X", "I am X")
+   - Hobbies ("I enjoy X")
+
+6. RELATIONSHIPS & CONNECTIONS:
+   - Social connections ("I know X")
+   - Professional relationships ("I work with X")
+   - Personal relationships ("I am friends with X")
+
+Format each fact as a complete sentence (e.g., "The user used to own a tea house in Japan").
+If no clear facts are present, reply exactly: NO FACT.
 
 Format each fact as a complete sentence starting with "The user" or "The AI".
 If no clear facts are present, reply exactly: NO FACT.
@@ -176,6 +203,8 @@ def seed_example_bots():
         "My name is Kai Tanaka.",
         "I was born on November 12th, 1992, in Osaka, Japan.",
         "I used to be a robotics engineer before opening a coffee shop.",
+        "I own a coffee shop called 'Cyber Brew'.",
+        "My coffee shop is located in Osaka, Japan.",
         "I am curious, innovative, and enjoy cyberpunk novels."
     ])
 
