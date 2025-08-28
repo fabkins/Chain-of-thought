@@ -2,12 +2,14 @@ import ollama
 import chromadb
 import uuid, datetime, os
 from colorama import Fore, Style, init
+import re  # Import re for regular expressions
 
 # --- Init colorama ---
 init(autoreset=True)
 
 # --- Config ---
 MODEL = "llama3.2"   # use same model for chat + embeddings
+ALLOW_EMOTES = False  # set True to keep *emotes* in bot replies
 
 # --- Setup ChromaDB ---
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -346,7 +348,7 @@ Answer ONLY as: "<core/event>,<bot/user>".
     return mem_type, target
 
 # --- Chat Function ---
-def chat_with_bot(bot_id, user_input, recent_history):
+def chat_with_bot(bot_id, user_input, recent_history, allow_emotes=ALLOW_EMOTES):
     memories = retrieve_memories(bot_id, user_input)
     
     history = "\n".join([f"{role}: {msg}" for role, msg in recent_history])
@@ -384,6 +386,10 @@ Assistant (in character):"""
 
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     reply = response["message"]["content"]
+    
+    # Optionally strip emotes like *smiles*
+    if not allow_emotes:
+        reply = re.sub(r"\*.*?\*", "", reply).strip()
 
     # Extract both user facts and bot statements from the interaction
     summary = summarize_interaction(user_input, reply)
@@ -501,7 +507,7 @@ if __name__ == "__main__":
         if user_input.lower() in ["quit", "exit"]:
             break
 
-        reply = chat_with_bot(bot_id, user_input, recent_histories[bot_id])
+        reply = chat_with_bot(bot_id, user_input, recent_histories[bot_id], allow_emotes=ALLOW_EMOTES)
 
         # separation + AI reply in green
         print(Fore.GREEN + f"\n{bot_id}: {reply}" + Style.RESET_ALL)
