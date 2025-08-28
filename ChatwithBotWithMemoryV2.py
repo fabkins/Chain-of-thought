@@ -72,11 +72,12 @@ def retrieve_memories(bot_id, query, n_results=5):
     
     # Create compound queries with different weights for different types of information
     queries = [
-        ("What do we know about this specific user's identity and background?", 10),  # High priority for user identity
-        ("What past interactions and history do we have with this user?", 8),         # High priority for past interactions
-        (query, 6),                                                                   # Medium priority for current query
-        ("What are the user's preferences and traits?", 4),                          # Lower priority for preferences
-        ("What are my own traits and background?", 2)                                # Lowest priority for bot's own info
+        ("What is known about the user's identity, background, and history?", 10),  # Highest priority - user core info
+        ("What recent interactions have occurred with this user?", 8),              # High priority - recent interactions
+        (query, 7),                                                                # Query-specific info
+        ("What are the user's preferences and traits?", 6),                        # User preferences
+        ("What is my personality and background?", 5),                             # Bot's core personality
+        ("What are my recent actions and current state?", 4)                       # Bot's current state
     ]
     
     # Query for both core and event memories
@@ -92,12 +93,19 @@ def retrieve_memories(bot_id, query, n_results=5):
         
         # Add unique memories while preserving order and applying weights
         for memory, dist in zip(results.get("documents", [[]])[0], results.get("distances", [[]])[0]):
-            # Adjust distance by weight (higher weight = lower effective distance)
-            weighted_dist = dist / weight
-            
-            if memory not in seen:
-                if memory.startswith("The user"):  # Prioritize user-related memories
-                    weighted_dist *= 0.8  # Further reduce distance for user memories
+            if memory not in seen and memory != "NO FACT":
+                # Base weight adjustment
+                weighted_dist = dist / weight
+                
+                # Further adjust based on memory type
+                if memory.startswith("The user"):
+                    if "name is" in memory.lower() or "used to" in memory.lower():
+                        weighted_dist *= 0.5  # Boost importance of core user facts
+                    else:
+                        weighted_dist *= 0.7  # Boost importance of other user facts
+                elif any(core in memory.lower() for core in ["my name is", "i was born", "i am"]):
+                    weighted_dist *= 0.8  # Boost importance of bot's core identity
+                
                 print(f"  Found (similarity={dist:.3f}, weighted={weighted_dist:.3f}): {memory}")
                 all_memories.append((memory, weighted_dist))
                 seen.add(memory)
@@ -226,19 +234,38 @@ Answer ONLY as: "<core/event>,<bot/user>".
 # --- Chat Function ---
 def chat_with_bot(bot_id, user_input, recent_history):
     memories = retrieve_memories(bot_id, user_input)
+    
+    # Separate bot and user memories
+    bot_memories = []
+    user_memories = []
+    for memory in memories:
+        if memory.startswith("The user"):
+            user_memories.append(memory)
+        elif not memory.startswith("NO FACT"):
+            bot_memories.append(memory)
+    
     history = "\n".join([f"{role}: {msg}" for role, msg in recent_history])
-    context = "\n".join(memories)
-
+    
     prompt = f"""
 You are a unique character with personality and evolving history.
 
-Core personality and relevant memories:
-{context}
+YOUR CORE PERSONALITY AND MEMORIES (these are facts about you, use "I" statements):
+{chr(10).join(bot_memories)}
+
+WHAT YOU KNOW ABOUT THE USER (these are facts about them):
+{chr(10).join(user_memories)}
 
 Recent conversation:
 {history}
 
 User: {user_input}
+
+Respond in character. Remember these rules:
+1. You are the character defined in YOUR CORE PERSONALITY section
+2. Use the facts from WHAT YOU KNOW ABOUT THE USER to inform your interactions
+3. Never present yourself as having the user's traits or experiences
+4. Stay consistent with your own background and personality
+
 Assistant (in character):"""
 
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
