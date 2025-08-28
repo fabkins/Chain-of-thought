@@ -41,8 +41,8 @@ def store_fact(bot_id, content, mem_type="event", importance=0.5):
             print(Fore.YELLOW + f"Comparing with existing fact (similarity={score:.3f}):" + Style.RESET_ALL)
             print(f"  New     : {content}")
             print(f"  Existing: {doc}")
-            # Using a more lenient threshold for duplicates
-            if score < 0.001:  # Much stricter comparison required for skipping
+            # Using a more lenient threshold for duplicates - if similarity score is less than 3000
+            if score < 3000:  
                 print(Fore.RED + "SKIPPED: Too similar to existing fact" + Style.RESET_ALL)
                 return
     
@@ -70,130 +70,104 @@ def retrieve_memories(bot_id, query, n_results=5):
     print("\n" + Fore.BLUE + "=== MEMORY RETRIEVAL ===" + Style.RESET_ALL)
     print(Fore.BLUE + f"Query: {query}" + Style.RESET_ALL)
     
-    # Create compound queries to get both general context and specific responses
+    # Create compound queries with different weights for different types of information
     queries = [
-        "Tell me about the user's background and history",  # Gets identity and history
-        "What are the user's preferences and traits",       # Gets personality and preferences
-        query,                                             # Gets query-specific memories
-        "What significant facts do we know about the user"  # Gets other important facts
+        ("What do we know about this specific user's identity and background?", 10),  # High priority for user identity
+        ("What past interactions and history do we have with this user?", 8),         # High priority for past interactions
+        (query, 6),                                                                   # Medium priority for current query
+        ("What are the user's preferences and traits?", 4),                          # Lower priority for preferences
+        ("What are my own traits and background?", 2)                                # Lowest priority for bot's own info
     ]
     
     # Query for both core and event memories
     all_memories = []
     seen = set()
     
-    for q in queries:
+    for q, weight in queries:
         print("\n" + Fore.CYAN + f"Searching with query: {q}" + Style.RESET_ALL)
-        # Get both core and regular memories for each query
         results = collection.query(
             query_embeddings=[embed_text(q)],
-            n_results=10  # Increased from 5 to get more context
+            n_results=10
         )
         
-        # Add unique memories while preserving order
+        # Add unique memories while preserving order and applying weights
         for memory, dist in zip(results.get("documents", [[]])[0], results.get("distances", [[]])[0]):
+            # Adjust distance by weight (higher weight = lower effective distance)
+            weighted_dist = dist / weight
+            
             if memory not in seen:
-                print(f"  Found (similarity={dist:.3f}): {memory}")
-                all_memories.append(memory)
+                if memory.startswith("The user"):  # Prioritize user-related memories
+                    weighted_dist *= 0.8  # Further reduce distance for user memories
+                print(f"  Found (similarity={dist:.3f}, weighted={weighted_dist:.3f}): {memory}")
+                all_memories.append((memory, weighted_dist))
                 seen.add(memory)
             else:
                 print(f"  Skipped duplicate: {memory}")
     
+    # Sort memories by weighted distance and take top N
+    all_memories.sort(key=lambda x: x[1])  # Sort by weighted distance
+    final_memories = [m[0] for m in all_memories]  # Extract just the memories
+    
     print("\n" + Fore.BLUE + "=== FINAL MEMORY SET ===" + Style.RESET_ALL)
-    for i, memory in enumerate(all_memories, 1):
+    for i, memory in enumerate(final_memories, 1):
         print(f"{i}. {memory}")
     
-    return all_memories
+    return final_memories
 
 # --- Summarization + Classification ---
 def summarize_interaction(user_input, ai_reply):
     """Extract only explicit factual info from the exchange."""
     prompt = f"""
-You are a fact extraction expert. Extract ONLY facts that were EXPLICITLY stated by the user. Ignore the AI's response completely.
+You are a fact extraction expert. Extract ONLY facts that were EXPLICITLY stated by the user in this interaction.
 
-RULES:
-1. Only extract facts that someone directly stated about themselves or others
-2. Do not extract facts from roleplay actions (e.g., *smiles*, *waves*)
-3. Do not make inferences or assumptions
-4. Do not include temporary states or actions
-5. Ignore greetings and casual conversation
-6. Pay special attention to extracting background info:
-   - Past locations where someone lived
-   - Previous businesses or jobs
-   - Past experiences and history
-   - Personal possessions (past or present)
-
-EXAMPLES:
-When someone says: "I used to live in London" 
-✓ EXTRACT: "The user used to live in London"
-
-When someone says: "it reminds me of a tea house I owned when I lived in Chester"
-✓ EXTRACT: "The user used to own a tea house in Chester"
-✓ EXTRACT: "The user used to live in Chester"
-
-When someone says: "*smiles* I love coffee" 
-✓ EXTRACT: "The user loves coffee"
-✗ DO NOT EXTRACT: "The user smiled"
-
-When someone says: "You must be from Japan"
-✗ DO NOT EXTRACT THIS - it's an assumption
-
-When someone says: "Let me get you some coffee"
-✗ DO NOT EXTRACT THIS - it's a temporary action
+RULES for Extracting Facts:
+1. Core Facts:
+   - Names (e.g., "I'm Fred" -> "The user's name is Fred")
+   - Locations (current or past)
+   - Occupations (current or past)
+   - Experiences ("I used to..." or "I have...")
+   - Relationships
+   - Preferences ("I like...", "I love...", "I hate...")
 
 2. History & Experience:
-   - Past occupations or roles
-   - Previous locations
-   - Past ownership or possessions
-   - Significant experiences
+   - Past locations and residences 
+   - Past ownership of places/things
+   - Previous jobs and roles
+   - Past experiences
+   - Places visited
 
-3. Current Status:
-   - Occupation or role
-   - Location
-   - Property or possessions
-   - Business details
+3. Current Information:
+   - Current location
+   - Current occupation
+   - Current preferences/interests
+   - Current relationships
 
-4. Personal Information:
-   - Family and relationships
-   - Skills and abilities
-   - Interests and hobbies
-   - Beliefs and values
+4. DO NOT Include:
+   - Temporary actions (smiling, waving)
+   - Greetings or casual chat
+   - Future plans
+   - The AI's responses or actions
+   - Hypothetical statements
+   - Questions asked by the user
 
-Guidelines:
-1. Important facts are those that:
-   - Reveal someone's identity or background
-   - Show their experiences or history
-   - Indicate their current situation
-   - Express their personality or values
+Examples:
+Input: "Hi, I'm Sarah"
+✓ Output: "The user's name is Sarah"
 
-2. When someone reveals information:
-   - Record the specific detail shared
-   - Include relevant context
-   - Preserve any qualifying information
-   - Note if it's past or present
+Input: "This reminds me of my old cafe in Paris"
+✓ Output: "The user used to own a cafe in Paris"
 
-3. Don't include:
-   - Temporary actions or states
-   - Casual chit-chat
-   - Hypothetical situations
-   - Inferred or assumed details
-   - Future plans or intentions
+Input: "I used to live in London before moving here"
+✓ Output: "The user used to live in London"
 
-Format each fact as a simple statement starting with "The user" or "The AI".
-If no explicit facts were stated, reply exactly: NO FACT.
+Input: "*smiles* How are you?"
+✗ Output: NO FACT (no actual facts stated)
 
-Format each fact as a complete sentence (e.g., "The user used to own a tea house in Japan").
-If no clear facts are present, reply exactly: NO FACT.
-
-Format each fact as a complete sentence starting with "The user" or "The AI".
-If no clear facts are present, reply exactly: NO FACT.
-
-Analyze this user message and extract any explicit facts about them:
+Analyze this user message and extract any explicit facts stated by the user:
 "{user_input}"
 
-List any facts you found, one per line. Start each fact with "The user". If no facts found, reply exactly: NO FACT.
-
-Facts:"""
+Format each fact as a complete sentence. If no clear facts are present, reply exactly: NO FACT.
+"""
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     return response["message"]["content"].strip()
 
