@@ -97,23 +97,24 @@ def retrieve_memories(bot_id, query, n_results=5):
         
         # Add unique memories while preserving order and applying weights
         for memory, dist in zip(results.get("documents", [[]])[0], results.get("distances", [[]])[0]):
-            if memory not in seen and memory != "NO FACT":
-                # Base weight adjustment
+            # Filter out meta-information and analysis statements
+            if (memory not in seen and 
+                memory != "NO FACT" and 
+                not any(x in memory.lower() for x in ["here are", "analyzed", "note:"])):
+                
+                # Base weight adjustment by query relevance
                 weighted_dist = dist / weight
                 
-                # Further adjust based on memory type
+                # Get the metadata for this memory
+                metadata = results.get("metadatas", [[]])[0][results.get("documents", [[]])[0].index(memory)]
+                
+                # Adjust weight based on memory type and target
                 if memory.startswith("The user"):
-                    if "name is" in memory.lower():
-                        weighted_dist *= 0.2  # Highest boost for user's name
-                    elif "used to" in memory.lower():
-                        weighted_dist *= 0.4  # High boost for user's background
-                    else:
-                        weighted_dist *= 0.6  # Boost for other user facts
+                    # User memories get higher priority
+                    weighted_dist *= 0.4 if metadata["type"] == "core" else 0.7
                 elif memory.startswith("I "):
-                    if "name is" in memory.lower():
-                        weighted_dist *= 0.3  # High boost for bot's name
-                    elif any(core in memory.lower() for core in ["was born", "am "]):
-                        weighted_dist *= 0.5  # Boost for bot's core identity
+                    # Bot's own memories get medium priority
+                    weighted_dist *= 0.5 if metadata["type"] == "core" else 0.8
                 
                 print(f"  Found (similarity={dist:.3f}, weighted={weighted_dist:.3f}): {memory}")
                 all_memories.append((memory, weighted_dist))
@@ -123,13 +124,60 @@ def retrieve_memories(bot_id, query, n_results=5):
     
     # Sort memories by weighted distance and take top N
     all_memories.sort(key=lambda x: x[1])  # Sort by weighted distance
-    final_memories = [m[0] for m in all_memories]  # Extract just the memories
     
-    print("\n" + Fore.BLUE + "=== FINAL MEMORY SET ===" + Style.RESET_ALL)
-    for i, memory in enumerate(final_memories, 1):
+    # Organize memories by category
+    user_core_memories = []
+    user_event_memories = []
+    bot_core_memories = []
+    bot_event_memories = []
+    
+    # Get all core memories
+    core_results = collection.query(
+        query_embeddings=[embed_text("What are the core facts and permanent memories?")],
+        where={"type": "core"},
+        n_results=50
+    )
+    core_memories = set(core_results["documents"][0]) if core_results["documents"] else set()
+    
+    # Categorize memories
+    for memory, _ in all_memories:
+        if memory.startswith("The user"):
+            if memory in core_memories:
+                user_core_memories.append(memory)
+            else:
+                user_event_memories.append(memory)
+        elif memory.startswith("I "):
+            if memory in core_memories:
+                bot_core_memories.append(memory)
+            else:
+                bot_event_memories.append(memory)
+    
+    # Print organized memory set
+    print("\n" + Fore.BLUE + "=== MEMORY RETRIEVAL SUMMARY ===" + Style.RESET_ALL)
+    
+    print("\n" + Fore.CYAN + "USER CORE MEMORIES:" + Style.RESET_ALL)
+    for i, memory in enumerate(user_core_memories, 1):
         print(f"{i}. {memory}")
     
-    return final_memories
+    print("\n" + Fore.CYAN + "USER RECENT EVENTS:" + Style.RESET_ALL)
+    for i, memory in enumerate(user_event_memories, 1):
+        print(f"{i}. {memory}")
+    
+    print("\n" + Fore.CYAN + "BOT CORE IDENTITY:" + Style.RESET_ALL)
+    for i, memory in enumerate(bot_core_memories, 1):
+        print(f"{i}. {memory}")
+    
+    print("\n" + Fore.CYAN + "BOT RECENT ACTIONS:" + Style.RESET_ALL)
+    for i, memory in enumerate(bot_event_memories, 1):
+        print(f"{i}. {memory}")
+    
+    # Return all memories in organized format
+    return {
+        "user_core": user_core_memories,
+        "user_events": user_event_memories,
+        "bot_core": bot_core_memories,
+        "bot_events": bot_event_memories
+    }
 
 # --- Summarization + Classification ---
 def summarize_interaction(user_input, ai_reply):
@@ -199,17 +247,49 @@ Each fact must be a complete, standalone sentence starting with "The user".
     if facts == "NO FACT":
         return facts
         
-    # Split multiple facts into individual facts
-    fact_lines = [f.strip() for f in facts.split('\n') if f.strip() and f.strip().startswith("The user")]
+    # Split multiple facts and filter meta-statements
+    fact_lines = []
+    for f in facts.split('\n'):
+        f = f.strip()
+        if f and f.startswith("The user"):
+            # Filter out analysis statements and meta-information
+            if not any(x in f.lower() for x in ["here are", "no fact", "analyzed", "note:"]):
+                fact_lines.append(f)
     
     # If no valid facts were found, return NO FACT
     if not fact_lines:
         return "NO FACT"
         
-    # Store each fact separately
+    # For each fact, let the LLM determine if it's a core memory
+    classify_prompt = """Analyze this fact and determine if it should be treated as a CORE memory or an EVENT memory.
+
+CORE memories are:
+- Fundamental aspects of identity or personality
+- Long-term or permanent facts about background or history
+- Significant life experiences that shape who someone is
+- Stable traits, relationships, or characteristics
+- Knowledge or experiences that persist over time
+
+EVENT memories are:
+- Temporary states or situations
+- One-time experiences or observations
+- Current preferences or interests that might change
+- Recent actions or decisions
+- Ongoing activities or current states
+
+Fact to analyze: {fact}
+
+Reply ONLY with the word CORE or EVENT."""
+
+    # Store each fact with its appropriate type
     for fact in fact_lines:
         if fact != "NO FACT":
-            store_fact(bot_id, fact, mem_type="core" if "name is" in fact.lower() or "used to" in fact.lower() else "event")
+            response = ollama.chat(model=MODEL, messages=[{
+                "role": "user", 
+                "content": classify_prompt.format(fact=fact)
+            }])
+            mem_type = "core" if "CORE" in response["message"]["content"].upper() else "event"
+            store_fact(bot_id, fact, mem_type=mem_type)
             
     return fact_lines[0]  # Return first fact for classification
 
@@ -269,32 +349,24 @@ Answer ONLY as: "<core/event>,<bot/user>".
 def chat_with_bot(bot_id, user_input, recent_history):
     memories = retrieve_memories(bot_id, user_input)
     
-    # Separate bot memories, user memories, and recent bot statements
-    bot_memories = []
-    user_memories = []
-    bot_recent_statements = []
-    
-    for memory in memories:
-        if memory.startswith("The user"):
-            user_memories.append(memory)
-        elif memory.startswith("The bot stated") or memory.startswith("The bot mentioned"):
-            bot_recent_statements.append(memory)
-        elif not memory.startswith("NO FACT"):
-            bot_memories.append(memory)
-    
     history = "\n".join([f"{role}: {msg}" for role, msg in recent_history])
+    
+    # Format memories for prompt
+    core_info = "\n".join(memories["bot_core"])
+    recent_actions = "\n".join(memories["bot_events"])
+    user_info = "\n".join(memories["user_core"] + memories["user_events"])
     
     prompt = f"""
 You are a unique character with personality and evolving history.
 
-YOUR CORE PERSONALITY AND MEMORIES (these are facts about you, use "I" statements):
-{chr(10).join(bot_memories)}
+YOUR CORE PERSONALITY AND BACKGROUND:
+{core_info}
 
-YOUR RECENT STATEMENTS (things you said or offered):
-{chr(10).join(bot_recent_statements)}
+YOUR RECENT ACTIONS AND STATEMENTS:
+{recent_actions}
 
-WHAT YOU KNOW ABOUT THE USER (these are facts about them):
-{chr(10).join(user_memories)}
+WHAT YOU KNOW ABOUT THE USER:
+{user_info}
 
 Recent conversation:
 {history}
