@@ -207,10 +207,11 @@ RULES for Extracting Facts:
    - Places visited
 
 3. Current Information:
-   - Current location
+   - Current location (look for phrases like "I live in", "where I live", "I'm in")
    - Current occupation
    - Current preferences/interests
    - Current relationships
+   - Look for embedded current facts within larger statements
 
 4. DO NOT Include:
    - Temporary actions (smiling, waving)
@@ -234,6 +235,10 @@ Input: "I used to live in London before moving here"
 ✓ Output:
 The user used to live in London
 
+Input: "We could do with places like this in London where I live now"
+✓ Output:
+The user currently lives in London
+
 Input: "*smiles* How are you?"
 ✗ Output: NO FACT
 
@@ -243,8 +248,17 @@ Analyze this user message and extract any explicit facts stated by the user:
 Format each fact as a complete sentence on its own line. If no clear facts are present, reply exactly: NO FACT.
 Each fact must be a complete, standalone sentence starting with "The user".
 """
+    # Display the summarization prompt in magenta
+    print(Fore.MAGENTA + "\n=== FACT EXTRACTION PROMPT ===" + Style.RESET_ALL)
+    print(Fore.MAGENTA + prompt + Style.RESET_ALL)
+    print(Fore.MAGENTA + "=== END PROMPT ===" + Style.RESET_ALL)
+
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     facts = response["message"]["content"].strip()
+    
+    print(Fore.MAGENTA + "\n=== EXTRACTED FACTS ===" + Style.RESET_ALL)
+    print(Fore.MAGENTA + facts + Style.RESET_ALL)
+    print(Fore.MAGENTA + "=== END FACTS ===" + Style.RESET_ALL)
     
     if facts == "NO FACT":
         return facts
@@ -383,6 +397,11 @@ Respond in character. Remember these rules:
 5. Stay consistent with your own background and personality
 
 Assistant (in character):"""
+
+    # Display the prompt in magenta
+    print(Fore.MAGENTA + "\n=== PROMPT TO LLM ===" + Style.RESET_ALL)
+    print(Fore.MAGENTA + prompt + Style.RESET_ALL)
+    print(Fore.MAGENTA + "=== END PROMPT ===" + Style.RESET_ALL)
 
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     reply = response["message"]["content"]
