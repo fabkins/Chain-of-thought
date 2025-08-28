@@ -41,7 +41,8 @@ def store_fact(bot_id, content, mem_type="event", importance=0.5):
             print(Fore.YELLOW + f"Comparing with existing fact (similarity={score:.3f}):" + Style.RESET_ALL)
             print(f"  New     : {content}")
             print(f"  Existing: {doc}")
-            if score < 0.1:
+            # Using a more lenient threshold for duplicates
+            if score < 0.001:  # Much stricter comparison required for skipping
                 print(Fore.RED + "SKIPPED: Too similar to existing fact" + Style.RESET_ALL)
                 return
     
@@ -108,7 +109,7 @@ def retrieve_memories(bot_id, query, n_results=5):
 def summarize_interaction(user_input, ai_reply):
     """Extract only explicit factual info from the exchange."""
     prompt = f"""
-You are a fact extraction expert. Read this conversation carefully and extract ONLY facts that were EXPLICITLY stated.
+You are a fact extraction expert. Extract ONLY facts that were EXPLICITLY stated by the user. Ignore the AI's response completely.
 
 RULES:
 1. Only extract facts that someone directly stated about themselves or others
@@ -116,10 +117,19 @@ RULES:
 3. Do not make inferences or assumptions
 4. Do not include temporary states or actions
 5. Ignore greetings and casual conversation
+6. Pay special attention to extracting background info:
+   - Past locations where someone lived
+   - Previous businesses or jobs
+   - Past experiences and history
+   - Personal possessions (past or present)
 
 EXAMPLES:
 When someone says: "I used to live in London" 
 ✓ EXTRACT: "The user used to live in London"
+
+When someone says: "it reminds me of a tea house I owned when I lived in Chester"
+✓ EXTRACT: "The user used to own a tea house in Chester"
+✓ EXTRACT: "The user used to live in Chester"
 
 When someone says: "*smiles* I love coffee" 
 ✓ EXTRACT: "The user loves coffee"
@@ -178,8 +188,10 @@ If no clear facts are present, reply exactly: NO FACT.
 Format each fact as a complete sentence starting with "The user" or "The AI".
 If no clear facts are present, reply exactly: NO FACT.
 
-User: {user_input}
-AI: {ai_reply}
+Analyze this user message and extract any explicit facts about them:
+"{user_input}"
+
+List any facts you found, one per line. Start each fact with "The user". If no facts found, reply exactly: NO FACT.
 
 Facts:"""
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
