@@ -24,7 +24,24 @@ def embed_text(text: str):
     return ollama.embeddings(model=MODEL, prompt=text)["embedding"]
 
 def store_fact(bot_id, content, mem_type="event", importance=0.5):
+    """Store a fact, but check for duplicates first."""
     collection = get_bot_collection(bot_id)
+    
+    # Check for similar existing memories to avoid duplicates
+    existing = collection.query(
+        query_embeddings=[embed_text(content)],
+        n_results=3  # Check a few closest matches
+    )
+    
+    # If we find a very similar memory, skip storing
+    if existing["documents"] and existing["documents"][0]:
+        # Compare the new fact with existing ones
+        for doc, score in zip(existing["documents"][0], existing["distances"][0]):
+            # If very similar (distance < 0.1), skip storing
+            if score < 0.1:
+                return
+    
+    # If we reach here, this is a new fact worth storing
     doc_id = str(uuid.uuid4())
     collection.add(
         ids=[doc_id],
@@ -64,49 +81,57 @@ def retrieve_memories(bot_id, query, n_results=5):
 def summarize_interaction(user_input, ai_reply):
     """Extract only explicit factual info from the exchange."""
     prompt = f"""
-Extract ALL clear factual statements from this interaction. For each statement:
-1. Start with WHO the fact is about ("The user" or "The AI")
-2. State the fact clearly and completely
-3. Include context if directly stated
+You are a fact extraction expert. Analyze this conversation and identify important facts about both participants.
+Both the user and AI are individuals with their own history, traits, and experiences.
 
-CAREFULLY CHECK FOR:
+For BOTH participants, look for facts about:
 
-1. NAMES & IDENTITY:
-   - Names and titles ("My name is X", "I am X", "I'm X")
-   - Roles and professions ("I am a X", "I work as X")
-   - Family relationships ("X is my Y")
+1. Identity & Background:
+   - Names and titles
+   - Origins and background
+   - Important dates or ages
+   - Cultural identity
 
-2. OWNERSHIP & POSSESSION:
-   - Current ownership ("I have X", "I own X")
-   - Business ownership ("My shop", "My store", "My company")
-   - Property ("My house", "My car")
+2. History & Experience:
+   - Past occupations or roles
+   - Previous locations
+   - Past ownership or possessions
+   - Significant experiences
 
-3. HISTORY & PAST:
-   - Past experiences ("I used to X")
-   - Previous ownership ("I had X")
-   - Past events ("When I was X")
-   - Previous jobs ("I worked as X")
-   - Memories ("reminds me of when")
-
-4. CURRENT STATUS:
-   - Present occupation
-   - Current location
-   - Current activities
+3. Current Status:
+   - Occupation or role
+   - Location
+   - Property or possessions
    - Business details
-   - Living situation
 
-5. PERSONAL TRAITS:
-   - Preferences ("I like X", "I love X")
-   - Skills ("I can X", "I know how to X")
-   - Habits ("I always X", "I never X")
-   - Beliefs ("I believe X", "I think X")
-   - Feelings ("I feel X", "I am X")
-   - Hobbies ("I enjoy X")
+4. Personal Information:
+   - Family and relationships
+   - Skills and abilities
+   - Interests and hobbies
+   - Beliefs and values
 
-6. RELATIONSHIPS & CONNECTIONS:
-   - Social connections ("I know X")
-   - Professional relationships ("I work with X")
-   - Personal relationships ("I am friends with X")
+Guidelines:
+1. Important facts are those that:
+   - Reveal someone's identity or background
+   - Show their experiences or history
+   - Indicate their current situation
+   - Express their personality or values
+
+2. When someone reveals information:
+   - Record the specific detail shared
+   - Include relevant context
+   - Preserve any qualifying information
+   - Note if it's past or present
+
+3. Don't include:
+   - Temporary actions or states
+   - Casual chit-chat
+   - Hypothetical situations
+   - Inferred or assumed details
+   - Future plans or intentions
+
+Format each fact as a simple statement starting with "The user" or "The AI".
+If no explicit facts were stated, reply exactly: NO FACT.
 
 Format each fact as a complete sentence (e.g., "The user used to own a tea house in Japan").
 If no clear facts are present, reply exactly: NO FACT.
