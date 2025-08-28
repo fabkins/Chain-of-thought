@@ -41,8 +41,12 @@ def store_fact(bot_id, content, mem_type="event", importance=0.5):
             print(Fore.YELLOW + f"Comparing with existing fact (similarity={score:.3f}):" + Style.RESET_ALL)
             print(f"  New     : {content}")
             print(f"  Existing: {doc}")
-            # Using a more lenient threshold for duplicates - if similarity score is less than 3000
-            if score < 3000:  
+            
+            # Special handling for identity information
+            is_identity_info = any(x in content.lower() for x in ["name is", "my name", "i am", "i'm"])
+            threshold = 2000 if is_identity_info else 3000
+            
+            if score < threshold:  
                 print(Fore.RED + "SKIPPED: Too similar to existing fact" + Style.RESET_ALL)
                 return
     
@@ -99,12 +103,17 @@ def retrieve_memories(bot_id, query, n_results=5):
                 
                 # Further adjust based on memory type
                 if memory.startswith("The user"):
-                    if "name is" in memory.lower() or "used to" in memory.lower():
-                        weighted_dist *= 0.5  # Boost importance of core user facts
+                    if "name is" in memory.lower():
+                        weighted_dist *= 0.2  # Highest boost for user's name
+                    elif "used to" in memory.lower():
+                        weighted_dist *= 0.4  # High boost for user's background
                     else:
-                        weighted_dist *= 0.7  # Boost importance of other user facts
-                elif any(core in memory.lower() for core in ["my name is", "i was born", "i am"]):
-                    weighted_dist *= 0.8  # Boost importance of bot's core identity
+                        weighted_dist *= 0.6  # Boost for other user facts
+                elif memory.startswith("I "):
+                    if "name is" in memory.lower():
+                        weighted_dist *= 0.3  # High boost for bot's name
+                    elif any(core in memory.lower() for core in ["was born", "am "]):
+                        weighted_dist *= 0.5  # Boost for bot's core identity
                 
                 print(f"  Found (similarity={dist:.3f}, weighted={weighted_dist:.3f}): {memory}")
                 all_memories.append((memory, weighted_dist))
@@ -129,13 +138,16 @@ def summarize_interaction(user_input, ai_reply):
 You are a fact extraction expert. Extract ONLY facts that were EXPLICITLY stated by the user in this interaction.
 
 RULES for Extracting Facts:
-1. Core Facts:
-   - Names (e.g., "I'm Fred" -> "The user's name is Fred")
+1. Identity Facts (Highest Priority):
+   - Names MUST be stored exactly as stated (e.g., "I'm Fred" -> "The user's name is Fred")
+   - All identity information must be explicit, never inferred
+   - Store with proper context of who the fact belongs to (user vs bot)
+   
+2. Core Background Facts:
    - Locations (current or past)
    - Occupations (current or past)
-   - Experiences ("I used to..." or "I have...")
    - Relationships
-   - Preferences ("I like...", "I love...", "I hate...")
+   - Long-term experiences ("I used to..." or "I have...")
 
 2. History & Experience:
    - Past locations and residences 
@@ -159,25 +171,47 @@ RULES for Extracting Facts:
    - Questions asked by the user
 
 Examples:
-Input: "Hi, I'm Sarah"
-✓ Output: "The user's name is Sarah"
+Input: "Hi, I'm Sarah and I used to live in Paris"
+✓ Output:
+The user's name is Sarah
+The user used to live in Paris
 
 Input: "This reminds me of my old cafe in Paris"
-✓ Output: "The user used to own a cafe in Paris"
+✓ Output:
+The user used to own a cafe in Paris
 
 Input: "I used to live in London before moving here"
-✓ Output: "The user used to live in London"
+✓ Output:
+The user used to live in London
 
 Input: "*smiles* How are you?"
-✗ Output: NO FACT (no actual facts stated)
+✗ Output: NO FACT
 
 Analyze this user message and extract any explicit facts stated by the user:
 "{user_input}"
 
-Format each fact as a complete sentence. If no clear facts are present, reply exactly: NO FACT.
+Format each fact as a complete sentence on its own line. If no clear facts are present, reply exactly: NO FACT.
+Each fact must be a complete, standalone sentence starting with "The user".
 """
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
-    return response["message"]["content"].strip()
+    facts = response["message"]["content"].strip()
+    
+    if facts == "NO FACT":
+        return facts
+        
+    # Split multiple facts into individual facts
+    fact_lines = [f.strip() for f in facts.split('\n') if f.strip() and f.strip().startswith("The user")]
+    
+    # If no valid facts were found, return NO FACT
+    if not fact_lines:
+        return "NO FACT"
+        
+    # Store each fact separately
+    for fact in fact_lines:
+        if fact != "NO FACT":
+            store_fact(bot_id, fact, mem_type="core" if "name is" in fact.lower() or "used to" in fact.lower() else "event")
+            
+    return fact_lines[0]  # Return first fact for classification
 
 def classify_memory(summary):
     """Decide if the summary is core/event, and whether it's about bot or user."""
@@ -235,12 +269,16 @@ Answer ONLY as: "<core/event>,<bot/user>".
 def chat_with_bot(bot_id, user_input, recent_history):
     memories = retrieve_memories(bot_id, user_input)
     
-    # Separate bot and user memories
+    # Separate bot memories, user memories, and recent bot statements
     bot_memories = []
     user_memories = []
+    bot_recent_statements = []
+    
     for memory in memories:
         if memory.startswith("The user"):
             user_memories.append(memory)
+        elif memory.startswith("The bot stated") or memory.startswith("The bot mentioned"):
+            bot_recent_statements.append(memory)
         elif not memory.startswith("NO FACT"):
             bot_memories.append(memory)
     
@@ -252,6 +290,9 @@ You are a unique character with personality and evolving history.
 YOUR CORE PERSONALITY AND MEMORIES (these are facts about you, use "I" statements):
 {chr(10).join(bot_memories)}
 
+YOUR RECENT STATEMENTS (things you said or offered):
+{chr(10).join(bot_recent_statements)}
+
 WHAT YOU KNOW ABOUT THE USER (these are facts about them):
 {chr(10).join(user_memories)}
 
@@ -262,21 +303,79 @@ User: {user_input}
 
 Respond in character. Remember these rules:
 1. You are the character defined in YOUR CORE PERSONALITY section
-2. Use the facts from WHAT YOU KNOW ABOUT THE USER to inform your interactions
-3. Never present yourself as having the user's traits or experiences
-4. Stay consistent with your own background and personality
+2. Stay consistent with YOUR RECENT STATEMENTS about menu items, offers, etc.
+3. Use the facts from WHAT YOU KNOW ABOUT THE USER to inform your interactions
+4. Never present yourself as having the user's traits or experiences
+5. Stay consistent with your own background and personality
 
 Assistant (in character):"""
 
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     reply = response["message"]["content"]
 
-    # --- Summarize + classify ---
+    # Extract both user facts and bot statements from the interaction
     summary = summarize_interaction(user_input, reply)
     mem_type, target = classify_memory(summary)
 
     if summary != "NO FACT" and mem_type:
         store_fact(bot_id, summary, mem_type=mem_type, importance=1.0 if mem_type == "core" else 0.5)
+
+    # Extract and store significant statements about the bot's activities and knowledge
+    extract_bot_statement_prompt = f"""
+Analyze the bot's reply for significant information that should be remembered for future conversations:
+
+1. Any specific activities the bot performs
+2. Any knowledge or expertise the bot demonstrates
+3. Any specific offerings, capabilities, or services mentioned
+4. Any distinctive features or characteristics described
+5. Any commitments or promises made
+
+Reply:
+{reply}
+
+Format output as "The bot [verb] [specific detail]", using verbs like:
+- stated (for facts)
+- mentioned (for references)
+- offered (for services/capabilities)
+- described (for characteristics)
+- promised (for commitments)
+
+Examples:
+Bot: "I can analyze your data using quantum algorithms, and I specialize in cryptography."
+✓ Output:
+The bot stated they can analyze data using quantum algorithms
+The bot mentioned they specialize in cryptography
+
+Bot: "Let me help you with that task tomorrow, I'll make sure it's done by noon."
+✓ Output:
+The bot promised to complete the task by noon tomorrow
+
+Bot: "How are you today? The weather is nice."
+✓ Output: NO FACT
+
+Each statement should be:
+1. Specific and concrete
+2. Relevant for future conversations
+3. Based on explicit statements, not implications
+4. Written in third person (The bot...)
+
+Format as one statement per line, or NO FACT if no significant statements found.
+"""
+    response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": extract_bot_statement_prompt}])
+    bot_statements = response["message"]["content"].strip()
+    
+    if bot_statements != "NO FACT":
+        for statement in bot_statements.split('\n'):
+            if statement.strip():
+                # Determine importance based on statement type
+                if "promised" in statement.lower():
+                    importance = 0.9  # Highest importance for commitments
+                elif any(word in statement.lower() for word in ["stated", "described"]):
+                    importance = 0.8  # High importance for facts and descriptions
+                else:
+                    importance = 0.6  # Normal importance for general statements
+                
+                store_fact(bot_id, statement.strip(), mem_type="event", importance=importance)
 
     return reply
 
@@ -317,7 +416,8 @@ if __name__ == "__main__":
 
     recent_histories = {}
 
-    bot_id = input("\nTalk to which bot? (e.g. isabella/kai): ").strip()
+    # bot_id = input("\nTalk to which bot? (e.g. isabella/kai): ").strip()
+    bot_id = "kai"
     if bot_id.lower() in ["quit", "exit"]:
         exit(0)
 
