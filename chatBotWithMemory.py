@@ -1,124 +1,195 @@
-import ollama
+# chatBotWithMemory.py
+import os
+import uuid
+import datetime
+import json
+import re
 import chromadb
-import uuid, datetime, os
 from colorama import Fore, Style, init
+import ollama
 
-# --- Init colorama ---
+# ---------- CONFIG ----------
+# Set your chat and embed model names here (default to the same model to avoid "model not found")
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "llama3.2")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", CHAT_MODEL)
+
+DB_DIR = "./chroma_db"            # persistent Chroma directory
+DEBUG = True                      # set False to reduce logs
+SUPPRESS_EMOTES = True            # strip *emotes* like *smiles* from AI output
+RETRIEVE_K = 4                    # how many similar memories to retrieve per side
+
+# colors
 init(autoreset=True)
 
-# --- Config ---
-MODEL = "llama3.2"   # use same model for chat + embeddings
+# ---------- ChromaDB client ----------
+if not os.path.exists(DB_DIR):
+    os.makedirs(DB_DIR, exist_ok=True)
+client = chromadb.PersistentClient(path=DB_DIR)
 
-# --- Setup ChromaDB ---
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+# ---------- Helpers: collections ----------
+def get_collection(bot_id: str, target: str):
+    """
+    target: 'bot' or 'user'
+    collection name pattern: chat_<bot>_bot or chat_<bot>_user
+    """
+    name = f"chat_{bot_id}_{target}"
+    # Explicitly do NOT supply an embedding_function here — we'll provide embeddings ourselves
+    return client.get_or_create_collection(name=name)
 
-def get_bot_collection(bot_id):
-    """Return (or create) a ChromaDB collection for this bot."""
-    return chroma_client.get_or_create_collection(
-        name=f"chat_{bot_id}"
-    )
+def list_collections():
+    try:
+        return client.list_collections()
+    except Exception:
+        # fallback: list dirs (best-effort)
+        try:
+            return os.listdir(DB_DIR)
+        except Exception:
+            return []
 
-# --- Memory Helpers ---
+def database_is_empty():
+    cols = list_collections()
+    return len(cols) == 0
+
+# ---------- Embeddings ----------
 def embed_text(text: str):
-    """Get an embedding using Ollama."""
-    return ollama.embeddings(model=MODEL, prompt=text)["embedding"]
+    """Return embedding vector or None on failure."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        resp = ollama.embeddings(model=EMBED_MODEL, prompt=text)
+        emb = resp.get("embedding")
+        if not emb:
+            if DEBUG:
+                print(Fore.RED + "[Embedding Error] model returned no embedding" + Style.RESET_ALL)
+            return None
+        return emb
+    except Exception as e:
+        if DEBUG:
+            print(Fore.RED + f"[Embedding Error] {e}" + Style.RESET_ALL)
+        return None
 
-def store_fact(bot_id, content, mem_type="event", importance=0.5):
-    collection = get_bot_collection(bot_id)
+# ---------- Memory storage ----------
+def store_fact(bot_id: str, fact: str, who: str = "user", fact_type: str = "core"):
+    """
+    who: 'user' or 'bot'
+    fact_type: 'core' or 'event'
+    """
+    fact = (fact or "").strip()
+    if not fact:
+        return
+
+    emb = embed_text(fact)
+    if emb is None:
+        # embedding failed; skip storing to avoid collection.add errors
+        if DEBUG:
+            print(Fore.CYAN + f"[Memory SKIP] Could not embed fact, skipping storage: {fact}" + Style.RESET_ALL)
+        return
+
+    coll = get_collection(bot_id, who)
     doc_id = str(uuid.uuid4())
-    collection.add(
+    coll.add(
         ids=[doc_id],
-        embeddings=[embed_text(content)],
-        documents=[content],
+        embeddings=[emb],
+        documents=[fact],
         metadatas=[{
-            "type": mem_type,
-            "timestamp": str(datetime.datetime.now()),
-            "importance": importance
+            "who": who,
+            "type": fact_type,
+            "timestamp": str(datetime.datetime.now())
         }]
     )
-    print(Fore.CYAN + f"[Memory Stored:{bot_id.upper()}] ({mem_type.upper()}) {content}" + Style.RESET_ALL)
+    if DEBUG:
+        print(Fore.CYAN + f"[Memory Stored:{bot_id.upper()}] ({fact_type.upper()}) [{who.upper()}] {fact}" + Style.RESET_ALL)
 
-def retrieve_memories(bot_id, query, n_results=5):
-    """Retrieve relevant memories for this bot (core + events)."""
-    collection = get_bot_collection(bot_id)
-    results = collection.query(
-        query_embeddings=[embed_text(query)],
-        n_results=n_results
-    )
-    return results.get("documents", [[]])[0]
+# ---------- Retrieval ----------
+def retrieve_relevant(bot_id: str, query: str, target: str = "bot", n_results: int = RETRIEVE_K):
+    """Return a list of retrieved documents (may be empty)."""
+    coll = get_collection(bot_id, target)
+    emb = embed_text(query)
+    if emb is None:
+        # can't query without an embedding
+        if DEBUG:
+            print(Fore.CYAN + f"[Retrieve SKIP] embedding failed; returning no memories for {target}" + Style.RESET_ALL)
+        return []
+    try:
+        results = coll.query(query_embeddings=[emb], n_results=n_results)
+        docs = results.get("documents", [[]])[0] if results.get("documents") else []
+        return docs or []
+    except Exception as e:
+        if DEBUG:
+            print(Fore.RED + f"[Retrieve Error] {e}" + Style.RESET_ALL)
+        return []
 
-# --- Summarization + Classification ---
-def summarize_interaction(user_input, ai_reply):
-    """Extract only explicit factual info from the exchange."""
+def retrieve_core_docs(bot_id: str, target: str = "bot"):
+    """Always include core facts (non-retrieval-based) to keep identity stable."""
+    coll = get_collection(bot_id, target)
+    try:
+        res = coll.get(where={"type": "core"})
+        return res.get("documents", []) if res else []
+    except Exception:
+        return []
+
+# ---------- Fact extraction (JSON) ----------
+def extract_facts_json(user_input: str, bot_reply: str):
+    """
+    Ask the model to return strict JSON with arrays:
+    {"user_core": [], "user_event": [], "bot_core": [], "bot_event": []}
+    """
     prompt = f"""
-From the following interaction, extract ONLY clear factual statements that were explicitly said 
-by the user or AI. Be concise (one sentence per fact). If no facts, reply exactly: NO FACT.
+You will extract explicit factual statements from the short dialogue below.
+Return ONLY valid JSON with exactly these four keys:
+{{"user_core": [], "user_event": [], "bot_core": [], "bot_event": []}}
 
+Rules:
+- Include only facts that were explicitly said in the dialogue. Do NOT invent, infer, or expand.
+- Put stable identity/history facts (e.g., jobs, places lived, family, previous ownership) in *_core.
+- Put situational/temporary/one-off details in *_event.
+- Each fact should be a concise neutral sentence (no opinions, no emotive asides).
+- If no facts for a category, return an empty array for that key.
+
+Dialogue:
 User: {user_input}
-AI: {ai_reply}
+Bot: {bot_reply}
 
-Facts:"""
-    response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
-    return response["message"]["content"].strip()
-
-def classify_memory(summary):
-    """Decide if the summary is core/event, and whether it's about bot or user."""
-    if summary == "NO FACT":
-        return None, None
-
-    prompt = f"""
-Classify this fact:
-"{summary}"
-
-1. Is this about the BOT or the USER?
-2. Is this a CORE fact (identity, persistent role, personal history, relationships, traits) 
-   or an EVENT (temporary, casual, recent situation)?
-
-Answer ONLY as: "<core/event>,<bot/user>".
+Return only the JSON object.
 """
-    response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
-    result = response["message"]["content"].strip().lower()
+    try:
+        resp = ollama.chat(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}])
+        txt = resp["message"]["content"].strip()
 
-    mem_type = "core" if "core" in result else "event"
-    target = "user" if "user" in result else "bot"
-    return mem_type, target
+        # Isolate first {...} block in the response
+        start = txt.find("{")
+        end = txt.rfind("}")
+        if start == -1 or end == -1:
+            raise ValueError("No JSON found in extractor output")
+        json_text = txt[start:end+1]
 
-# --- Chat Function ---
-def chat_with_bot(bot_id, user_input, recent_history):
-    memories = retrieve_memories(bot_id, user_input)
-    history = "\n".join([f"{role}: {msg}" for role, msg in recent_history])
-    context = "\n".join(memories)
+        data = json.loads(json_text)
+        # Ensure keys exist
+        for k in ("user_core", "user_event", "bot_core", "bot_event"):
+            if k not in data or not isinstance(data[k], list):
+                data[k] = []
+        return data
+    except Exception as e:
+        if DEBUG:
+            print(Fore.RED + f"[Fact Extraction Error] {e}" + Style.RESET_ALL)
+            print(Fore.CYAN + "[Fact Extractor Output (raw)]:", flush=True)
+            try:
+                # show the raw model output for debugging
+                resp = ollama.chat(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}])
+                print(resp["message"]["content"])
+            except Exception as e2:
+                print(Fore.RED + f"[Fact Extractor Retry Error] {e2}" + Style.RESET_ALL)
+        # Fallback: return empty lists
+        return {"user_core": [], "user_event": [], "bot_core": [], "bot_event": []}
 
-    prompt = f"""
-You are a unique character with personality and evolving history.
-
-Core personality and relevant memories:
-{context}
-
-Recent conversation:
-{history}
-
-User: {user_input}
-Assistant (in character):"""
-
-    response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
-    reply = response["message"]["content"]
-
-    # --- Summarize + classify ---
-    summary = summarize_interaction(user_input, reply)
-    mem_type, target = classify_memory(summary)
-
-    if summary != "NO FACT" and mem_type:
-        store_fact(bot_id, summary, mem_type=mem_type, importance=1.0 if mem_type == "core" else 0.5)
-
-    return reply
-
-# --- Seed Bots ---
-def seed_bot(bot_id, backstory_facts):
+# ---------- Seeding example bots ----------
+def seed_bot(bot_id: str, backstory_facts: list[str]):
     for fact in backstory_facts:
-        store_fact(bot_id, fact, mem_type="core", importance=1.0)
+        store_fact(bot_id, fact, who="bot", fact_type="core")
 
 def seed_example_bots():
+    # Example backstories (run once)
     seed_bot("isabella", [
         "My name is Isabella Rossi.",
         "I was born on April 3rd, 1985, in Florence, Italy.",
@@ -134,23 +205,99 @@ def seed_example_bots():
         "I am curious, innovative, and enjoy cyberpunk novels."
     ])
 
-def database_is_empty():
-    return len(chroma_client.list_collections()) == 0
+# ---------- Chat flow ----------
+def build_context(bot_id: str, user_input: str, recent_history: list[tuple]):
+    # Always include core facts (bot and user)
+    bot_core = retrieve_core_docs(bot_id, target="bot")
+    user_core = retrieve_core_docs(bot_id, target="user")
 
-# --- Interactive Chat Loop ---
+    # Retrieve relevant events (semantic)
+    bot_events = retrieve_relevant(bot_id, user_input, target="bot", n_results=RETRIEVE_K)
+    user_events = retrieve_relevant(bot_id, user_input, target="user", n_results=RETRIEVE_K)
+
+    pieces = []
+    if bot_core:
+        pieces.append("Bot core facts:\n" + "\n".join(bot_core))
+    if user_core:
+        pieces.append("User core facts:\n" + "\n".join(user_core))
+    if bot_events:
+        pieces.append("Bot relevant events:\n" + "\n".join(bot_events))
+    if user_events:
+        pieces.append("User relevant events:\n" + "\n".join(user_events))
+
+    # Recent short-term dialogue
+    history = "\n".join([f"{role}: {msg}" for role, msg in recent_history])
+    if history:
+        pieces.append("Recent conversation:\n" + history)
+
+    return "\n\n".join(pieces)
+
+def chat_with_bot(bot_id: str, user_input: str, recent_history: list[tuple], allow_emotes: bool = True):
+    # Build context + prompt
+    context = build_context(bot_id, user_input, recent_history)
+    system_msg = f"You are roleplaying as {bot_id}. Stay in character and be consistent with your core facts."
+
+    # If we want to avoid emotes, tell the model
+    user_instructions = ("Avoid emotive stage directions like *smiles*, *laughs*, or actions unless the user asks for roleplay."
+                         if not allow_emotes else "You may use light emotive stage directions when expressive cues help.")
+
+    prompt = f"""{user_instructions}
+
+Context (from memory and recent chat):
+{context}
+
+User: {user_input}
+Bot:"""
+
+    # Send system + user messages
+    try:
+        resp = ollama.chat(model=CHAT_MODEL, messages=[{"role":"system","content":system_msg}, {"role":"user","content":prompt}])
+        reply = resp["message"]["content"].strip()
+    except Exception as e:
+        print(Fore.RED + f"[Chat Error] {e}" + Style.RESET_ALL)
+        return "Sorry — model error."
+
+    # Optionally suppress emotes for display
+    display_reply = reply
+    if SUPPRESS_EMOTES and not allow_emotes:
+        display_reply = re.sub(r"\*[^*]+\*", "", display_reply).strip()
+
+    # Extract facts (JSON) and debug-print them
+    fact_data = extract_facts_json(user_input, reply)
+    if DEBUG:
+        print(Fore.CYAN + "[FACT-EXTRACTOR OUTPUT]" + Style.RESET_ALL)
+        print(json.dumps(fact_data, indent=2))
+    # Store facts
+    for f in fact_data.get("user_core", []):
+        store_fact(bot_id, f, who="user", fact_type="core")
+    for f in fact_data.get("user_event", []):
+        store_fact(bot_id, f, who="user", fact_type="event")
+    for f in fact_data.get("bot_core", []):
+        store_fact(bot_id, f, who="bot", fact_type="core")
+    for f in fact_data.get("bot_event", []):
+        store_fact(bot_id, f, who="bot", fact_type="event")
+
+    # Print conversation with colors and separation
+    print(Fore.YELLOW + f"\nYou to {bot_id}: {user_input}" + Style.RESET_ALL)
+    print(Fore.GREEN + f"\n{bot_id}: {display_reply}\n" + Style.RESET_ALL)
+
+    return reply
+
+# ---------- Main ----------
 if __name__ == "__main__":
-    print("Multi-Bot Chatbot ready! Type 'quit' to exit.\n")
-
+    # Auto-seed if DB appears empty
     if database_is_empty():
-        print("No database found, seeding example bots...")
-        os.makedirs("./chroma_db", exist_ok=True)
+        print(Fore.CYAN + "No database collections found — seeding example bots..." + Style.RESET_ALL)
         seed_example_bots()
+
+    print(Fore.CYAN + "Multi-Bot Chatbot ready! Type 'quit' to exit." + Style.RESET_ALL)
 
     recent_histories = {}
 
-    bot_id = input("\nTalk to which bot? (e.g. isabella/kai): ").strip()
-    if bot_id.lower() in ["quit", "exit"]:
-        exit(0)
+    bot_id = input(Fore.YELLOW + "\nTalk to which bot? (e.g. isabella/kai): " + Style.RESET_ALL).strip()
+    if not bot_id:
+        print("No bot selected — exiting.")
+        raise SystemExit(0)
 
     while True:
         if bot_id not in recent_histories:
@@ -160,12 +307,11 @@ if __name__ == "__main__":
         if user_input.lower() in ["quit", "exit"]:
             break
 
-        reply = chat_with_bot(bot_id, user_input, recent_histories[bot_id])
+        # Chat & memory
+        reply = chat_with_bot(bot_id, user_input, recent_histories[bot_id], allow_emotes=not SUPPRESS_EMOTES)
 
-        # separation + AI reply in green
-        print(Fore.GREEN + f"\n{bot_id}: {reply}" + Style.RESET_ALL)
-
-        # Update short-term memory (last 10 turns)
+        # update short term memory buffer (last 10 items as (role,msg))
         recent_histories[bot_id].append(("user", user_input))
         recent_histories[bot_id].append(("assistant", reply))
         recent_histories[bot_id] = recent_histories[bot_id][-10:]
+
