@@ -26,6 +26,7 @@ def embed_text(text: str):
 def store_fact(bot_id, content, mem_type="event", importance=0.5):
     """Store a fact, but check for duplicates first."""
     collection = get_bot_collection(bot_id)
+    print("\n" + Fore.YELLOW + "=== CHECKING FOR DUPLICATES ===" + Style.RESET_ALL)
     
     # Check for similar existing memories to avoid duplicates
     existing = collection.query(
@@ -37,8 +38,11 @@ def store_fact(bot_id, content, mem_type="event", importance=0.5):
     if existing["documents"] and existing["documents"][0]:
         # Compare the new fact with existing ones
         for doc, score in zip(existing["documents"][0], existing["distances"][0]):
-            # If very similar (distance < 0.1), skip storing
+            print(Fore.YELLOW + f"Comparing with existing fact (similarity={score:.3f}):" + Style.RESET_ALL)
+            print(f"  New     : {content}")
+            print(f"  Existing: {doc}")
             if score < 0.1:
+                print(Fore.RED + "SKIPPED: Too similar to existing fact" + Style.RESET_ALL)
                 return
     
     # If we reach here, this is a new fact worth storing
@@ -53,44 +57,79 @@ def store_fact(bot_id, content, mem_type="event", importance=0.5):
             "importance": importance
         }]
     )
-    print(Fore.CYAN + f"[Memory Stored:{bot_id.upper()}] ({mem_type.upper()}) {content}" + Style.RESET_ALL)
+    print("\n" + Fore.GREEN + "=== STORING NEW FACT ===" + Style.RESET_ALL)
+    print(Fore.GREEN + f"ID: {doc_id}" + Style.RESET_ALL)
+    print(Fore.GREEN + f"Type: {mem_type}" + Style.RESET_ALL)
+    print(Fore.GREEN + f"Content: {content}" + Style.RESET_ALL)
 
 def retrieve_memories(bot_id, query, n_results=5):
     """Retrieve relevant memories for this bot (core + events)."""
     collection = get_bot_collection(bot_id)
     
-    # Always get core memories first
-    core_results = collection.query(
-        query_embeddings=[embed_text(query)],
-        n_results=n_results,
-        where={"type": "core"}
-    )
+    print("\n" + Fore.BLUE + "=== MEMORY RETRIEVAL ===" + Style.RESET_ALL)
+    print(Fore.BLUE + f"Query: {query}" + Style.RESET_ALL)
     
-    # Then get relevant event memories
-    event_results = collection.query(
-        query_embeddings=[embed_text(query)],
-        n_results=n_results,
-        where={"type": "event"}
-    )
+    # Create compound queries to get both general context and specific responses
+    queries = [
+        "Tell me about the user's background and history",  # Gets identity and history
+        "What are the user's preferences and traits",       # Gets personality and preferences
+        query,                                             # Gets query-specific memories
+        "What significant facts do we know about the user"  # Gets other important facts
+    ]
     
-    # Combine results, prioritizing core memories
-    memories = core_results.get("documents", [[]])[0] + event_results.get("documents", [[]])[0]
-    return memories
+    # Query for both core and event memories
+    all_memories = []
+    seen = set()
+    
+    for q in queries:
+        print("\n" + Fore.CYAN + f"Searching with query: {q}" + Style.RESET_ALL)
+        # Get both core and regular memories for each query
+        results = collection.query(
+            query_embeddings=[embed_text(q)],
+            n_results=10  # Increased from 5 to get more context
+        )
+        
+        # Add unique memories while preserving order
+        for memory, dist in zip(results.get("documents", [[]])[0], results.get("distances", [[]])[0]):
+            if memory not in seen:
+                print(f"  Found (similarity={dist:.3f}): {memory}")
+                all_memories.append(memory)
+                seen.add(memory)
+            else:
+                print(f"  Skipped duplicate: {memory}")
+    
+    print("\n" + Fore.BLUE + "=== FINAL MEMORY SET ===" + Style.RESET_ALL)
+    for i, memory in enumerate(all_memories, 1):
+        print(f"{i}. {memory}")
+    
+    return all_memories
 
 # --- Summarization + Classification ---
 def summarize_interaction(user_input, ai_reply):
     """Extract only explicit factual info from the exchange."""
     prompt = f"""
-You are a fact extraction expert. Analyze this conversation and identify important facts about both participants.
-Both the user and AI are individuals with their own history, traits, and experiences.
+You are a fact extraction expert. Read this conversation carefully and extract ONLY facts that were EXPLICITLY stated.
 
-For BOTH participants, look for facts about:
+RULES:
+1. Only extract facts that someone directly stated about themselves or others
+2. Do not extract facts from roleplay actions (e.g., *smiles*, *waves*)
+3. Do not make inferences or assumptions
+4. Do not include temporary states or actions
+5. Ignore greetings and casual conversation
 
-1. Identity & Background:
-   - Names and titles
-   - Origins and background
-   - Important dates or ages
-   - Cultural identity
+EXAMPLES:
+When someone says: "I used to live in London" 
+✓ EXTRACT: "The user used to live in London"
+
+When someone says: "*smiles* I love coffee" 
+✓ EXTRACT: "The user loves coffee"
+✗ DO NOT EXTRACT: "The user smiled"
+
+When someone says: "You must be from Japan"
+✗ DO NOT EXTRACT THIS - it's an assumption
+
+When someone says: "Let me get you some coffee"
+✗ DO NOT EXTRACT THIS - it's a temporary action
 
 2. History & Experience:
    - Past occupations or roles
@@ -152,20 +191,38 @@ def classify_memory(summary):
         return None, None
 
     prompt = f"""
-Classify this fact STRICTLY:
-"{summary}"
+You are a memory classification expert. Analyze this fact and classify it based on these rules:
 
-Rules:
-1. CORE facts (always mark as core):
-   - Names ("My name is X", "I am X")
-   - Past experiences ("I used to have/be X")
-   - Personal history ("I worked as X")
-   - Permanent traits ("I love X", "I enjoy X")
-   
-2. EVENT facts:
-   - Current actions ("I am drinking")
-   - Temporary states ("I feel tired")
+Memory Type:
+1. CORE facts (unchanging or historical facts):
+   - Identity (name, birthplace, nationality)
+   - History (past jobs, education, lived places)
+   - Background (upbringing, culture, language)
+   - Permanent traits (personality, values, beliefs)
+   - Long-term relationships (family, close friends)
+   - Skills and expertise
+   - Past experiences and accomplishments
+
+2. EVENT facts (changeable or temporary):
+   - Current activities or states
+   - Recent experiences
+   - Temporary conditions or situations
    - One-time occurrences
+   - Ongoing activities
+   - Current emotions or thoughts
+   - Short-term preferences
+
+Target:
+- Look at the start of the fact: "The user" or "The AI"
+- Classify as USER or BOT accordingly
+
+Provide your answer as: "<core/event>,<user/bot>"
+
+For example:
+"The user's name is John" -> "core,user"
+"The AI is currently making coffee" -> "event,bot"
+"The user used to live in Paris" -> "core,user"
+"The AI enjoys cyberpunk novels" -> "core,bot"
 
 3. Target:
    - If fact starts with "The user" or contains user's name -> USER
