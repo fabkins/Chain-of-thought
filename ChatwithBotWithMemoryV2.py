@@ -295,16 +295,39 @@ EVENT memories are:
 
 Fact to analyze: {fact}
 
-Reply ONLY with the word CORE or EVENT."""
+Explain your reasoning and then reply with ONLY the word CORE or EVENT on a new line.
+Your explanation should consider:
+1. Is this a permanent or temporary fact?
+2. Is this about identity/background or current state?
+3. Will this likely change over time?
+4. Is this fundamental to who the person is?"""
 
     # Store each fact with its appropriate type
     for fact in fact_lines:
         if fact != "NO FACT":
+            print(Fore.MAGENTA + "\n=== FACT CLASSIFICATION ===" + Style.RESET_ALL)
+            print(Fore.MAGENTA + f"Analyzing fact: {fact}" + Style.RESET_ALL)
+            
+            # Format and show the classification prompt
+            formatted_prompt = classify_prompt.format(fact=fact)
+            print(Fore.MAGENTA + "Classification Prompt:" + Style.RESET_ALL)
+            print(formatted_prompt)
+            
+            # Get the classification
             response = ollama.chat(model=MODEL, messages=[{
                 "role": "user", 
-                "content": classify_prompt.format(fact=fact)
+                "content": formatted_prompt
             }])
-            mem_type = "core" if "CORE" in response["message"]["content"].upper() else "event"
+            
+            # Show the full response
+            print(Fore.MAGENTA + "\nLLM Response:" + Style.RESET_ALL)
+            print(response["message"]["content"])
+            
+            # Extract just the classification (last line)
+            classification = response["message"]["content"].strip().split('\n')[-1].upper()
+            mem_type = "core" if "CORE" in classification else "event"
+            
+            print(Fore.MAGENTA + f"\nClassified as: {mem_type}" + Style.RESET_ALL)
             store_fact(bot_id, fact, mem_type=mem_type)
             
     return fact_lines[0]  # Return first fact for classification
@@ -410,14 +433,112 @@ Assistant (in character):"""
     if not allow_emotes:
         reply = re.sub(r"\*.*?\*", "", reply).strip()
 
-    # Extract both user facts and bot statements from the interaction
-    summary = summarize_interaction(user_input, reply)
-    mem_type, target = classify_memory(summary)
+    # Analyze the entire conversation exchange for facts
+    conversation_analysis_prompt = f"""
+You are a fact extraction expert analyzing a conversation exchange.
+Analyze both the user's message and the bot's response to extract facts about both participants.
 
-    if summary != "NO FACT" and mem_type:
-        store_fact(bot_id, summary, mem_type=mem_type, importance=1.0 if mem_type == "core" else 0.5)
+CONVERSATION TO ANALYZE:
+User: {user_input}
+Bot: {reply}
 
-    # Extract and store significant statements about the bot's activities and knowledge
+Previous Context:
+{user_info}
+
+RULES:
+1. Extract facts about both the user and the bot
+2. Consider both explicit statements and clearly implied facts
+3. Consider how facts relate to previous context
+4. Separate facts into categories:
+   - User Core Facts (identity, background, permanent traits)
+   - User Current Facts (current situation, temporary states)
+   - Bot Actions (what the bot did or offered)
+   - Bot Commitments (promises or plans made)
+
+Format the output in clear sections:
+
+USER_CORE:
+- [fact 1]
+- [fact 2]
+
+USER_CURRENT:
+- [fact 1]
+- [fact 2]
+
+BOT_ACTION:
+- [fact 1]
+- [fact 2]
+
+BOT_COMMITMENT:
+- [fact 1]
+- [fact 2]
+
+If no facts for a category, write "None" under that category.
+Each fact should be a complete, standalone sentence.
+
+Examples:
+User: "I live in London now, I used to be in Paris"
+Bot: "I'll prepare your coffee right away!"
+Output:
+USER_CORE: The user used to live in Paris
+USER_CURRENT: The user currently lives in London
+BOT_COMMITMENT: The bot promised to prepare coffee
+
+Only include clear, definite facts. If no facts found in a category, omit that category.
+"""
+    # Get comprehensive fact analysis
+    response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": conversation_analysis_prompt}])
+    fact_analysis = response["message"]["content"].strip()
+    
+    print(Fore.MAGENTA + "\n=== CONVERSATION FACT ANALYSIS ===" + Style.RESET_ALL)
+    print(Fore.MAGENTA + fact_analysis + Style.RESET_ALL)
+    
+    # Process and store the analyzed facts
+    current_category = None
+    facts_by_category = {'USER_CORE': [], 'USER_CURRENT': [], 'BOT_ACTION': [], 'BOT_COMMITMENT': []}
+    
+    for line in fact_analysis.split('\n'):
+        line = line.strip()
+        if not line: continue
+        
+        # Check for category headers
+        if line.endswith(':'):
+            current_category = line[:-1].strip()  # Remove the colon
+            continue
+            
+        # Skip lines that are headers or don't contain actual facts
+        if any(x in line.lower() for x in ['none', 'directly stated', 'here are', 'extracted facts']):
+            continue
+            
+        # Skip empty or malformed facts
+        if not line or line == '-' or len(line) < 5:
+            continue
+            
+        # Remove bullet points if present
+        if line.startswith('- '):
+            line = line[2:]
+            
+        # Only process fact if we have a valid category and the fact is well-formed
+        if current_category in facts_by_category and line and len(line) >= 5:
+            # Ensure the fact is a complete sentence
+            if not line.endswith('.'):
+                line = line + '.'
+            facts_by_category[current_category].append(line)
+            
+    # Store facts by category with appropriate importance and type
+    for category, facts in facts_by_category.items():
+        for fact in facts:
+            try:
+                if category == 'USER_CORE':
+                    store_fact(bot_id, fact, mem_type="core", importance=1.0)
+                elif category == 'USER_CURRENT':
+                    store_fact(bot_id, fact, mem_type="event", importance=0.7)
+                elif category == 'BOT_ACTION':
+                    store_fact(bot_id, fact, mem_type="event", importance=0.6)
+                elif category == 'BOT_COMMITMENT':
+                    store_fact(bot_id, fact, mem_type="event", importance=0.9)
+            except Exception as e:
+                print(f"\nError storing fact: {fact}\nCategory: {category}\nError: {str(e)}")    # Keep the existing bot statement extraction for additional context
     extract_bot_statement_prompt = f"""
 Analyze the bot's reply for significant information that should be remembered for future conversations:
 
