@@ -10,9 +10,10 @@ init(autoreset=True)
 # --- Config ---
 MODEL = "llama3.2"   # use same model for chat + embeddings
 ALLOW_EMOTES = False  # set True to keep *emotes* in bot replies
+DB_DIRECTORY = "./chroma_db"
 
 # --- Setup ChromaDB ---
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+chroma_client = chromadb.PersistentClient(path=DB_DIRECTORY)
 
 def get_bot_core_collection(bot_id):
     """Return (or create) a ChromaDB collection for this bot's core memories (shared between users)."""
@@ -121,7 +122,7 @@ def retrieve_memories(bot_id, user_id, query, n_results=5):
             "distances": [[*core_results.get("distances", [[]])[0], *user_results.get("distances", [[]])[0]]],
             "metadatas": [[*core_results.get("metadatas", [[]])[0], *user_results.get("metadatas", [[]])[0]]]
         }
-        clear
+        
         # Add unique memories while preserving order and applying weights
         for memory, dist in zip(results.get("documents", [[]])[0], results.get("distances", [[]])[0]):
             # Filter out meta-information and analysis statements
@@ -687,7 +688,7 @@ if __name__ == "__main__":
 
     if database_is_empty():
         print("No database found, seeding example bots...")
-        os.makedirs("./chroma_db", exist_ok=True)
+        os.makedirs(DB_DIRECTORY, exist_ok=True)
         seed_example_bots()
 
     recent_histories = {}
