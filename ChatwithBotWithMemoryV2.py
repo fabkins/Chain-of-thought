@@ -313,6 +313,10 @@ Your explanation should consider:
             print(Fore.MAGENTA + "Classification Prompt:" + Style.RESET_ALL)
             print(formatted_prompt)
             
+            print(Fore.MAGENTA + "\n=== SENDING CLASSIFICATION REQUEST TO LLM ===" + Style.RESET_ALL)
+            print(Fore.MAGENTA + "Prompt:" + Style.RESET_ALL)
+            print(formatted_prompt)
+            
             # Get the classification
             response = ollama.chat(model=MODEL, messages=[{
                 "role": "user", 
@@ -320,14 +324,19 @@ Your explanation should consider:
             }])
             
             # Show the full response
-            print(Fore.MAGENTA + "\nLLM Response:" + Style.RESET_ALL)
+            print(Fore.MAGENTA + "\n=== LLM CLASSIFICATION RESPONSE ===" + Style.RESET_ALL)
             print(response["message"]["content"])
             
             # Extract just the classification (last line)
             classification = response["message"]["content"].strip().split('\n')[-1].upper()
             mem_type = "core" if "CORE" in classification else "event"
             
-            print(Fore.MAGENTA + f"\nClassified as: {mem_type}" + Style.RESET_ALL)
+            print(Fore.MAGENTA + f"\n=== FINAL CLASSIFICATION: {mem_type} ===" + Style.RESET_ALL)
+            print(Fore.MAGENTA + "Reasoning from response:" + Style.RESET_ALL)
+            # Print all lines except the last one (which is just CORE or EVENT)
+            reasoning = "\n".join(response["message"]["content"].strip().split('\n')[:-1])
+            print(reasoning)
+            
             store_fact(bot_id, fact, mem_type=mem_type)
             
     return fact_lines[0]  # Return first fact for classification
@@ -422,11 +431,17 @@ Respond in character. Remember these rules:
 Assistant (in character):"""
 
     # Display the prompt in magenta
-    print(Fore.MAGENTA + "\n=== PROMPT TO LLM ===" + Style.RESET_ALL)
-    print(Fore.MAGENTA + prompt + Style.RESET_ALL)
+    print(Fore.MAGENTA + "\n=== SENDING CHAT REQUEST TO LLM ===" + Style.RESET_ALL)
+    print(Fore.MAGENTA + "Full Prompt:" + Style.RESET_ALL)
+    print(prompt)
     print(Fore.MAGENTA + "=== END PROMPT ===" + Style.RESET_ALL)
 
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
+    
+    print(Fore.MAGENTA + "\n=== LLM CHAT RESPONSE ===" + Style.RESET_ALL)
+    print(response["message"]["content"])
+    print(Fore.MAGENTA + "=== END RESPONSE ===" + Style.RESET_ALL)
+    
     reply = response["message"]["content"]
     
     # Optionally strip emotes like *smiles*
@@ -487,11 +502,17 @@ BOT_COMMITMENT: The bot promised to prepare coffee
 Only include clear, definite facts. If no facts found in a category, omit that category.
 """
     # Get comprehensive fact analysis
+    print(Fore.MAGENTA + "\n=== SENDING FACT ANALYSIS REQUEST TO LLM ===" + Style.RESET_ALL)
+    print(Fore.MAGENTA + "Analysis Prompt:" + Style.RESET_ALL)
+    print(conversation_analysis_prompt)
+    print(Fore.MAGENTA + "=== END ANALYSIS PROMPT ===" + Style.RESET_ALL)
+    
     response = ollama.chat(model=MODEL, messages=[{"role": "user", "content": conversation_analysis_prompt}])
     fact_analysis = response["message"]["content"].strip()
     
-    print(Fore.MAGENTA + "\n=== CONVERSATION FACT ANALYSIS ===" + Style.RESET_ALL)
-    print(Fore.MAGENTA + fact_analysis + Style.RESET_ALL)
+    print(Fore.MAGENTA + "\n=== LLM FACT ANALYSIS RESPONSE ===" + Style.RESET_ALL)
+    print(fact_analysis)
+    print(Fore.MAGENTA + "=== END ANALYSIS RESPONSE ===" + Style.RESET_ALL)
     
     # Process and store the analyzed facts
     current_category = None
