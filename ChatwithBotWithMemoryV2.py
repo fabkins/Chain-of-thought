@@ -14,10 +14,16 @@ ALLOW_EMOTES = False  # set True to keep *emotes* in bot replies
 # --- Setup ChromaDB ---
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
-def get_bot_collection(bot_id):
-    """Return (or create) a ChromaDB collection for this bot."""
+def get_bot_core_collection(bot_id):
+    """Return (or create) a ChromaDB collection for this bot's core memories (shared between users)."""
     return chroma_client.get_or_create_collection(
-        name=f"chat_{bot_id}"
+        name=f"bot_core_{bot_id}"
+    )
+
+def get_user_memory_collection(bot_id, user_id):
+    """Return (or create) a ChromaDB collection for user-specific memories with this bot."""
+    return chroma_client.get_or_create_collection(
+        name=f"chat_{bot_id}_user_{user_id}"
     )
 
 # --- Memory Helpers ---
@@ -25,9 +31,14 @@ def embed_text(text: str):
     """Get an embedding using Ollama."""
     return ollama.embeddings(model=MODEL, prompt=text)["embedding"]
 
-def store_fact(bot_id, content, mem_type="event", importance=0.5):
+def store_fact(bot_id, user_id, content, mem_type="event", importance=0.5):
     """Store a fact, but check for duplicates first."""
-    collection = get_bot_collection(bot_id)
+    # Determine if this is a core bot memory or user-specific memory
+    is_bot_core = content.lower().startswith("i ") and mem_type == "core"
+    
+    # Choose the appropriate collection
+    collection = get_bot_core_collection(bot_id) if is_bot_core else get_user_memory_collection(bot_id, user_id)
+    
     print("\n" + Fore.YELLOW + "=== CHECKING FOR DUPLICATES ===" + Style.RESET_ALL)
     
     # Check for similar existing memories to avoid duplicates
@@ -69,9 +80,10 @@ def store_fact(bot_id, content, mem_type="event", importance=0.5):
     print(Fore.GREEN + f"Type: {mem_type}" + Style.RESET_ALL)
     print(Fore.GREEN + f"Content: {content}" + Style.RESET_ALL)
 
-def retrieve_memories(bot_id, query, n_results=5):
-    """Retrieve relevant memories for this bot (core + events)."""
-    collection = get_bot_collection(bot_id)
+def retrieve_memories(bot_id, user_id, query, n_results=5):
+    """Retrieve relevant memories combining bot core memories and user-specific memories."""
+    core_collection = get_bot_core_collection(bot_id)
+    user_collection = get_user_memory_collection(bot_id, user_id)
     
     print("\n" + Fore.BLUE + "=== MEMORY RETRIEVAL ===" + Style.RESET_ALL)
     print(Fore.BLUE + f"Query: {query}" + Style.RESET_ALL)
@@ -92,11 +104,24 @@ def retrieve_memories(bot_id, query, n_results=5):
     
     for q, weight in queries:
         print("\n" + Fore.CYAN + f"Searching with query: {q}" + Style.RESET_ALL)
-        results = collection.query(
+        
+        # Query both collections
+        core_results = core_collection.query(
+            query_embeddings=[embed_text(q)],
+            n_results=10
+        )
+        user_results = user_collection.query(
             query_embeddings=[embed_text(q)],
             n_results=10
         )
         
+        # Combine results
+        results = {
+            "documents": [[*core_results.get("documents", [[]])[0], *user_results.get("documents", [[]])[0]]],
+            "distances": [[*core_results.get("distances", [[]])[0], *user_results.get("distances", [[]])[0]]],
+            "metadatas": [[*core_results.get("metadatas", [[]])[0], *user_results.get("metadatas", [[]])[0]]]
+        }
+        clear
         # Add unique memories while preserving order and applying weights
         for memory, dist in zip(results.get("documents", [[]])[0], results.get("distances", [[]])[0]):
             # Filter out meta-information and analysis statements
@@ -133,13 +158,24 @@ def retrieve_memories(bot_id, query, n_results=5):
     bot_core_memories = []
     bot_event_memories = []
     
-    # Get all core memories
-    core_results = collection.query(
+    # Get all core memories from both collections
+    bot_core_results = core_collection.query(
         query_embeddings=[embed_text("What are the core facts and permanent memories?")],
         where={"type": "core"},
         n_results=50
     )
-    core_memories = set(core_results["documents"][0]) if core_results["documents"] else set()
+    user_core_results = user_collection.query(
+        query_embeddings=[embed_text("What are the core facts and permanent memories?")],
+        where={"type": "core"},
+        n_results=50
+    )
+    
+    # Combine core memories from both collections
+    core_memories = set()
+    if bot_core_results["documents"]:
+        core_memories.update(bot_core_results["documents"][0])
+    if user_core_results["documents"]:
+        core_memories.update(user_core_results["documents"][0])
     
     # Categorize memories
     for memory, _ in all_memories:
@@ -394,8 +430,8 @@ Answer ONLY as: "<core/event>,<bot/user>".
     return mem_type, target
 
 # --- Chat Function ---
-def chat_with_bot(bot_id, user_input, recent_history, allow_emotes=ALLOW_EMOTES):
-    memories = retrieve_memories(bot_id, user_input)
+def chat_with_bot(bot_id, user_id, user_input, recent_history, allow_emotes=ALLOW_EMOTES):
+    memories = retrieve_memories(bot_id, user_id, user_input)
     
     history = "\n".join([f"{role}: {msg}" for role, msg in recent_history])
     
@@ -551,13 +587,13 @@ Only include clear, definite facts. If no facts found in a category, omit that c
         for fact in facts:
             try:
                 if category == 'USER_CORE':
-                    store_fact(bot_id, fact, mem_type="core", importance=1.0)
+                    store_fact(bot_id, user_id, fact, mem_type="core", importance=1.0)
                 elif category == 'USER_CURRENT':
-                    store_fact(bot_id, fact, mem_type="event", importance=0.7)
+                    store_fact(bot_id, user_id, fact, mem_type="event", importance=0.7)
                 elif category == 'BOT_ACTION':
-                    store_fact(bot_id, fact, mem_type="event", importance=0.6)
+                    store_fact(bot_id, user_id, fact, mem_type="event", importance=0.6)
                 elif category == 'BOT_COMMITMENT':
-                    store_fact(bot_id, fact, mem_type="event", importance=0.9)
+                    store_fact(bot_id, user_id, fact, mem_type="event", importance=0.9)
             except Exception as e:
                 print(f"\nError storing fact: {fact}\nCategory: {category}\nError: {str(e)}")    # Keep the existing bot statement extraction for additional context
     extract_bot_statement_prompt = f"""
@@ -614,14 +650,15 @@ Format as one statement per line, or NO FACT if no significant statements found.
                 else:
                     importance = 0.6  # Normal importance for general statements
                 
-                store_fact(bot_id, statement.strip(), mem_type="event", importance=importance)
+                store_fact(bot_id, user_id, statement.strip(), mem_type="event", importance=importance)
 
     return reply
 
 # --- Seed Bots ---
 def seed_bot(bot_id, backstory_facts):
+    # For core bot facts, we use a special "global" user_id
     for fact in backstory_facts:
-        store_fact(bot_id, fact, mem_type="core", importance=1.0)
+        store_fact(bot_id, "global", fact, mem_type="core", importance=1.0)
 
 def seed_example_bots():
     seed_bot("isabella", [
@@ -659,6 +696,9 @@ if __name__ == "__main__":
     bot_id = "kai"
     if bot_id.lower() in ["quit", "exit"]:
         exit(0)
+        
+    # Get or generate a user ID
+    user_id = input("\nEnter your user ID (or press Enter to use 'default'): ").strip() or "default"
 
     while True:
         if bot_id not in recent_histories:
@@ -668,7 +708,7 @@ if __name__ == "__main__":
         if user_input.lower() in ["quit", "exit"]:
             break
 
-        reply = chat_with_bot(bot_id, user_input, recent_histories[bot_id], allow_emotes=ALLOW_EMOTES)
+        reply = chat_with_bot(bot_id, user_id, user_input, recent_histories[bot_id], allow_emotes=ALLOW_EMOTES)
 
         # separation + AI reply in green
         print(Fore.GREEN + f"\n{bot_id}: {reply}" + Style.RESET_ALL)

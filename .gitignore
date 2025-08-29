@@ -2,7 +2,7 @@
 venv/
 
 # Exclude ChromaDB persistent database
-chroma_db/
+chroma_db*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
